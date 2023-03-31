@@ -6,14 +6,16 @@ import logging
 from pathlib import Path
 import time
 import os
-
+from tqdm import tqdm
 import numpy as np
 import torch
+import wandb
 
 from torch.utils import data
 from torch.utils.data import DataLoader
 import torchvision
-from torchvision import datasets, transforms
+from torchvision import datasets
+import transforms
 import torchvision.utils as vutils
 from tensorboardX import SummaryWriter
 
@@ -21,7 +23,7 @@ from dataset.datasets import WLFWDatasets
 from models.pfld import PFLDInference, AuxiliaryNet
 from pfld.loss import PFLDLoss
 from pfld.utils import AverageMeter
-from my_transforms import *
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
@@ -50,10 +52,8 @@ def train(train_loader, pfld_backbone, auxiliarynet, criterion, optimizer,
     losses = AverageMeter()
 
     weighted_loss, loss = None, None
-    num = 0
-    for img, landmark_gt, attribute_gt, euler_angle_gt in train_loader:
-        num += 1
-        print(num)
+
+    for img, landmark_gt, attribute_gt, euler_angle_gt in tqdm(train_loader):
         img = img.to(device)
         attribute_gt = attribute_gt.to(device)
         landmark_gt = landmark_gt.to(device)
@@ -62,6 +62,7 @@ def train(train_loader, pfld_backbone, auxiliarynet, criterion, optimizer,
         auxiliarynet = auxiliarynet.to(device)
         features, landmarks = pfld_backbone(img)
         angle = auxiliarynet(features)
+        # weighted_loss: wingloss, loss=L2loss * 2
         weighted_loss, loss = criterion(attribute_gt, landmark_gt,
                                         euler_angle_gt, angle, landmarks,
                                         args.train_batchsize)
@@ -94,15 +95,33 @@ def validate(wlfw_val_dataloader, pfld_backbone, auxiliarynet, criterion):
 
 
 def main(args):
+    
+    
+    wandb.init(
+    # set the wandb project where this run will be logged
+    project="my_pfld",
+    
+    # track hyperparameters and run metadata
+    config={
+    "learning_rate": args.base_lr,
+    "architecture": "PFLD",
+    "dataset": "WFLW",
+    "epochs": args.end_epoch,
+    }
+)
+    
+    
+    
+    
     # Step 1: parse args config
-    logging.basicConfig(
-        format=
-        '[%(asctime)s] [p%(process)s] [%(pathname)s:%(lineno)d] [%(levelname)s] %(message)s',
-        level=logging.INFO,
-        handlers=[
-            logging.FileHandler(args.log_file, mode='w'),
-            logging.StreamHandler()
-        ])
+    # logging.basicConfig(
+    #     format=
+    #     '[%(asctime)s] [p%(process)s] [%(pathname)s:%(lineno)d] [%(levelname)s] %(message)s',
+    #     level=logging.INFO,
+    #     handlers=[
+    #         logging.FileHandler(args.log_file, mode='w'),
+    #         logging.StreamHandler()
+    #     ])
     print_args(args)
 
     # Step 2: model, criterion, optimizer, scheduler
@@ -118,37 +137,52 @@ def main(args):
         weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', patience=args.lr_patience, verbose=True)
+    # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 90, gamma=0.1, last_epoch=-1)
+    
     if args.resume:
         checkpoint = torch.load(args.resume)
         auxiliarynet.load_state_dict(checkpoint["auxiliarynet"])
         pfld_backbone.load_state_dict(checkpoint["pfld_backbone"])
-        args.start_epoch = checkpoint["epoch"]
+        args.start_epoch = checkpoint["epoch"] + 1
 
     # step 3: data
     # argumetion
-    transform = transforms.Compose([transforms.ToTensor()])
-    wlfwdataset = WLFWDatasets(args.dataroot, transform)
+    data_transform = {
+        "train": transforms.Compose([
+            transforms.Random_hflip(0.4),
+            transforms.Random_Noise(0.3, 0.12),
+            transforms.Random_Rotation(0.3, 30),
+            transforms.ToTensor()
+        ]),
+        "val": transforms.Compose([
+            transforms.ToTensor()
+        ])
+    }
+
+    wlfwdataset = WLFWDatasets(args.dataroot, data_transform['train'])
     dataloader = DataLoader(wlfwdataset,
                             batch_size=args.train_batchsize,
                             shuffle=True,
                             num_workers=args.workers,
                             drop_last=False)
 
-    wlfw_val_dataset = WLFWDatasets(args.val_dataroot, transform)
+    wlfw_val_dataset = WLFWDatasets(args.val_dataroot, data_transform['val'])
     wlfw_val_dataloader = DataLoader(wlfw_val_dataset,
                                      batch_size=args.val_batchsize,
                                      shuffle=False,
                                      num_workers=args.workers)
 
     # step 4: run
-    writer = SummaryWriter(args.tensorboard)
+    # writer = SummaryWriter(args.tensorboard)
+    # f = open('valloss.txt', 'w')
     for epoch in range(args.start_epoch, args.end_epoch + 1):
         print("Now the epoch is: " + str(epoch))
+        
         weighted_train_loss, train_loss = train(dataloader, pfld_backbone,
                                                 auxiliarynet, criterion,
                                                 optimizer, epoch)
         filename = os.path.join(str(args.snapshot),
-                                "checkpoint_epoch_" + str(epoch) + '.pth.tar')
+                                'last_epoch.pth')
         save_checkpoint(
             {
                 'epoch': epoch,
@@ -158,14 +192,29 @@ def main(args):
 
         val_loss = validate(wlfw_val_dataloader, pfld_backbone, auxiliarynet,
                             criterion)
-
+        # val_loss 为简单的L2误差
+        wandb.log({"acc": train_loss, "val_loss": val_loss})
+        # f.write('epoch: {0} , val_loss: {1}'.format(epoch, val_loss))
+        # f.write('\n')
+        if epoch == args.start_epoch:
+            bestloss = val_loss
+        if val_loss < bestloss:
+            save_checkpoint(
+            {
+                'epoch': epoch,
+                'pfld_backbone': pfld_backbone.state_dict(),
+                'auxiliarynet': auxiliarynet.state_dict()
+            }
+            , os.path.join(str(args.snapshot),
+                                'best_val_loss.pth'))
         scheduler.step(val_loss)
-        writer.add_scalar('data/weighted_loss', weighted_train_loss, epoch)
-        writer.add_scalars('data/loss', {
-            'val loss': val_loss,
-            'train loss': train_loss
-        }, epoch)
-    writer.close()
+        # writer.add_scalar('data/weighted_loss', weighted_train_loss, epoch)
+        # writer.add_scalars('data/loss', {
+        #     'val loss': val_loss,
+        #     'train loss': train_loss
+        # }, epoch)
+    wandb.finish()
+    # writer.close()
 
 
 def parse_args():
@@ -176,18 +225,18 @@ def parse_args():
     parser.add_argument('--test_initial', default='false', type=str2bool)  # TBD
     # training
     ##  -- optimizer
-    parser.add_argument('--_lbaser', default=0.001, type=int)
+    parser.add_argument('--base_lr', default=0.0001, type=int)
     parser.add_argument('--weight-decay', '--wd', default=1e-6, type=float)
     # -- lr
-    parser.add_argument("--lr_patience", default=20, type=int)
+    parser.add_argument("--lr_patience", default=40, type=int)
 
     # -- epoch
     parser.add_argument('--start_epoch', default=1, type=int)
-    parser.add_argument('--end_epoch', default=500, type=int)
+    parser.add_argument('--end_epoch', default=300, type=int)
 
     # -- snapshot、tensorboard log and checkpoint
     parser.add_argument('--snapshot',
-                        default='./checkpoint/snapshot/',
+                        default='./checkpoint/init_pfld_dataAugmentation/',
                         type=str,
                         metavar='PATH')
     parser.add_argument('--log_file',
@@ -198,7 +247,7 @@ def parse_args():
                         type=str)
     parser.add_argument(
         '--resume',
-        default='./checkpoint/snapshot/best.pth.tar',
+        default='',
         type=str,
         metavar='PATH')
 

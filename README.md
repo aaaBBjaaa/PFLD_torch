@@ -51,8 +51,7 @@ $ python3 test.py
 
 ~~~~shell
 python3 pytorch2onnx.py
-~~~~
-
+~~
 
 
 #### 6. reference: 

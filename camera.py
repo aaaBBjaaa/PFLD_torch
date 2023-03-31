@@ -5,7 +5,7 @@ import cv2
 
 import torch
 import torchvision
-
+import time
 from models.pfld import PFLDInference, AuxiliaryNet
 from mtcnn.detector import detect_faces
 
@@ -56,14 +56,16 @@ def main(args):
             if (edx1 > 0 or edy1 > 0 or edx2 > 0 or edy2 > 0):
                 cropped = cv2.copyMakeBorder(cropped, edy1, edy2, edx1, edx2,
                                              cv2.BORDER_CONSTANT, 0)
-
+            time0 = time.time()
             input = cv2.resize(cropped, (112, 112))
+            
             input = transform(input).unsqueeze(0).to(device)
             _, landmarks = pfld_backbone(input)
             pre_landmark = landmarks[0]
             pre_landmark = pre_landmark.cpu().detach().numpy().reshape(
                 -1, 2) * [size, size] - [edx1, edy1]
-
+            time1 = time.time()
+            print('推理时间为： {}ms'.format(1000*(time1-time0)))
             for (x, y) in pre_landmark.astype(np.int32):
                 cv2.circle(img, (x1 + x, y1 + y), 1, (0, 0, 255))
 
@@ -75,7 +77,7 @@ def main(args):
 def parse_args():
     parser = argparse.ArgumentParser(description='Testing')
     parser.add_argument('--model_path',
-                        default="checkpoint/snapshot/init_adam_wing.pth",
+                        default="checkpoint/snapshot/init_adam_wing_dataAugmentation.pth",
                         type=str)
     args = parser.parse_args()
     return args
