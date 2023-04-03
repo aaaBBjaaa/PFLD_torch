@@ -5,7 +5,7 @@
 # ------------------------------------------------------------------------------
 import argparse
 import time
-
+import os
 import cv2
 import numpy as np
 from matplotlib import pyplot as plt
@@ -22,7 +22,7 @@ from models.pfld import PFLDInference
 cudnn.benchmark = True
 cudnn.determinstic = True
 cudnn.enabled = True
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device('cpu')
 
 
 def compute_nme(preds, target):
@@ -120,6 +120,36 @@ def validate(wlfw_val_dataloader, pfld_backbone):
         print("inference_cost_time: {0:4f}".format(np.mean(cost_time)))
 
 
+def validate_directory(file_path, pfld_backbone):
+    pfld_backbone.eval()
+    data = os.listdir(file_path)
+    for i in data:
+        img = cv2.imread(os.path.join(file_path, i))
+        img = cv2.resize(img, (112,112))
+        # img = np.transpose(img,(2,0,1))
+        # img = torch.tensor(np.expand_dims(img,0)/255.)
+        img = transforms.ToTensor()(img)
+        img = torch.unsqueeze(img, 0)
+        _, landmarks = pfld_backbone(img)
+        landmarks = landmarks.detach().cpu().numpy()
+        landmarks = landmarks.reshape(landmarks.shape[0], -1, 2)  # landmark
+        if args.show_image:
+                show_img = np.array(
+                    np.transpose(img[0].cpu().numpy(), (1, 2, 0)))
+                show_img = (show_img * 255).astype(np.uint8)
+                np.clip(show_img, 0, 255)
+
+                pre_landmark = landmarks[0] * [112, 112]
+
+                cv2.imwrite("show_img.jpg", show_img)
+                img_clone = cv2.imread("show_img.jpg")
+
+                for (x, y) in pre_landmark.astype(np.int32):
+                    cv2.circle(img_clone, (x, y), 1, (255, 0, 0), -1)
+                cv2.imshow("show_img.jpg", img_clone)
+                cv2.waitKey(0)
+        
+
 def main(args):
     checkpoint = torch.load(args.model_path, map_location=device)
     pfld_backbone = PFLDInference().to(device)
@@ -132,6 +162,7 @@ def main(args):
                                      shuffle=False,
                                      num_workers=0)
 
+    validate_directory('./test_img', pfld_backbone)
     validate(wlfw_val_dataloader, pfld_backbone)
 
 
